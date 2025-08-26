@@ -25,7 +25,6 @@ const Map = () => {
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const loadedRef = useRef(false);
   const markersRef = useRef<Record<string, mapboxgl.Marker>>({});
-  const lineColorRef = useRef<Record<string, string>>({});
   const popupRef = useRef<mapboxgl.Popup | null>(null);
   const focusedRef = useRef(false);
   const drones = useDronesStore((s) => s.drones);
@@ -69,32 +68,16 @@ const Map = () => {
       let marker = markersRef.current[id];
       if (!marker) {
         const el = document.createElement("div");
-        el.innerHTML = `
-          <svg viewBox="0 0 24 24" width="22" height="22">
-            <path d="M12 2l4 8-4-2-4 2 4-8zm0 10a1 1 0 110 2 1 1 0 010-2z" fill="${color}" />
-          </svg>
-        `;
+        el.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l4 8-4-2-4 2 4-8zm0 10a1 1 0 110 2 1 1 0 010-2z" fill="${color}" /></svg>`;
         el.style.transform = `rotate(${d.yaw}deg)`;
         el.style.transformOrigin = "11px 11px";
         el.style.cursor = "pointer";
-
         el.addEventListener("mouseenter", () => {
-          const html = `
-            <div style="font: 12px/1.4 Inter, system-ui">
-              <div style="font-weight:600;margin-block-end:4px">${d.serial || d.id}</div>
-              <div>Altitude: <b>${Math.round(d.altitude)} m</b></div>
-              <div>Flight Time: <b>${fmtDuration(Date.now() - d.startTime)}</b></div>
-            </div>
-          `;
-          popupRef.current
-            ?.setLngLat([lng, lat])
-            .setHTML(html)
-            .addTo(map);
+          const html = `<div style="font: 12px/1.4 Inter, system-ui"><div style="font-weight:600;margin-block-end:4px">${d.serial || d.id}</div><div>Altitude: <b>${Math.round(d.altitude)} m</b></div><div>Flight Time: <b>${fmtDuration(Date.now() - d.startTime)}</b></div></div>`;
+          popupRef.current?.setLngLat([lng, lat]).setHTML(html).addTo(map);
         });
-
         el.addEventListener("mouseleave", () => popupRef.current?.remove());
         el.addEventListener("click", () => setSelected(id));
-
         marker = new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
         markersRef.current[id] = marker;
       } else {
@@ -107,42 +90,44 @@ const Map = () => {
           popupRef.current.setLngLat([lng, lat]);
         }
       }
-
-      const srcId = `track-${id}`;
-      const layerId = `track-${id}`;
-      const coords: [number, number][] = (d.track.length ? d.track : [d.coordinates]).map((c) => [c[0], c[1]]);
-      const data: Feature<LineString> = {
-        type: "Feature",
-        properties: {},
-        geometry: { type: "LineString", coordinates: coords },
-      };
-
-      const src = map.getSource(srcId) as GeoJSONSource | undefined;
-      if (!src) {
-        map.addSource(srcId, { type: "geojson", data });
-        map.addLayer({
-          id: layerId,
-          type: "line",
-          source: srcId,
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": color,
-            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2, 12, 3, 14, 4],
-            "line-opacity": 0.9,
-            "line-blur": 0.2,
-          },
-        });
-        lineColorRef.current[id] = color;
-      } else {
-        src.setData(data as any);
-        if (lineColorRef.current[id] !== color) {
-          if (map.getLayer(layerId)) {
-            map.setPaintProperty(layerId, "line-color", color);
-          }
-          lineColorRef.current[id] = color;
-        }
-      }
     });
+
+    const PATH_SRC = "all-paths";
+    const PATH_LAYER = "all-paths-layer";
+
+    const features: Feature<LineString>[] = all
+    
+      .filter((d) => (d.track?.length ?? 0) > 1)
+      .map((d) => ({
+        type: "Feature",
+        properties: {
+          color: canFly(d.registration) ? "#16a34a" : "#ef4444",
+        },
+        geometry: {
+          type: "LineString",
+          coordinates: d.track.map((c) => [c[0], c[1]]),
+        },
+      }));
+
+    const fc = { type: "FeatureCollection", features } as any;
+
+    const src = map.getSource(PATH_SRC) as GeoJSONSource | undefined;
+    if (!src) {
+      map.addSource(PATH_SRC, { type: "geojson", data: fc });
+      map.addLayer({
+        id: PATH_LAYER,
+        type: "line",
+        source: PATH_SRC,
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: {
+          "line-color": ["get", "color"],
+          "line-width": 3,
+          "line-opacity": 0.95,
+        },
+      });
+    } else {
+      src.setData(fc);
+    }
   }, [drones]);
 
   return <div ref={mapContainer} style={{ width: "100%", height: "600px", position: "relative" }} />;
