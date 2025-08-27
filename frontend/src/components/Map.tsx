@@ -46,9 +46,9 @@ export default function Map() {
         type: "line",
         source: "paths",
         paint: {
-          "line-color": "#7dd3fc",
-          "line-width": 2,
-          "line-opacity": 0.7,
+          "line-color": ["get", "color"], // ← اللون من الخصائص
+          "line-width": ["case", ["==", ["get", "isSelected"], 1], 4, 2],
+          "line-opacity": 0.9,
         },
       });
     });
@@ -88,6 +88,7 @@ export default function Map() {
     const map = mapRef.current;
     const seen = new Set<string>();
 
+    // markers
     Object.values(drones).forEach((d) => {
       seen.add(d.id);
       const green = canFly(d.registration);
@@ -112,6 +113,7 @@ export default function Map() {
           .setLngLat(d.coordinates as LngLatLike)
           .addTo(map);
 
+        marker.getElement().style.cursor = "pointer";
         marker.getElement().addEventListener("mouseenter", () => {
           popup.setLngLat(d.coordinates as LngLatLike).addTo(map);
         });
@@ -145,24 +147,26 @@ export default function Map() {
       }
     }
 
-    const lines = Object.values(drones)
-      .map((d) => d.path)
-      .filter((p) => p && p.length >= 2);
+    // paths (red/green + highlight)
+    const features = Object.values(drones)
+      .filter((d) => d.path && d.path.length >= 2)
+      .map((d) => ({
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: d.path },
+        properties: {
+          id: d.id,
+          color: canFly(d.registration) ? "#22c55e" : "#ef4444",
+          isSelected: selectedId === d.id ? 1 : 0,
+        },
+      }));
 
-    const data =
-      lines.length === 0
-        ? { type: "FeatureCollection", features: [] }
-        : {
-            type: "Feature",
-            geometry: { type: "MultiLineString", coordinates: lines },
-            properties: {},
-          };
-
+    const data = { type: "FeatureCollection", features } as any;
     const src = map.getSource("paths") as mapboxgl.GeoJSONSource;
     if (src) {
-      src.setData(data as any);
+      src.setData(data);
     }
 
+    // auto zoom if only one drone
     if (Object.values(drones).length === 1) {
       const d = Object.values(drones)[0];
       map.easeTo({

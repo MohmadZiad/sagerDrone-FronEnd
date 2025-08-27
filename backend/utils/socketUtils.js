@@ -2,7 +2,7 @@ const socketIO = require("socket.io");
 
 exports.sio = (server) => {
   return socketIO(server, {
-    transports: ["polling"],
+    transports: ["websocket", "polling"],
     cors: {
       origin: "*",
     },

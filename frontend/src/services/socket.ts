@@ -10,12 +10,13 @@ type FeatureCollection = {
   features: Array<{
     type: "Feature";
     properties: {
-      serial: string;
-      registration: string;
-      altitude: number;
-      yaw: number;
+      serial?: string;
+      registration?: string;
+      altitude?: number;
+      yaw?: number;
       pilot?: string;
       organization?: string;
+      id?: string;
     };
     geometry: { type: "Point"; coordinates: [number, number] };
   }>;
@@ -44,9 +45,13 @@ function getOrCreateTrackId(coord: [number, number]) {
       bestId = d.id;
     }
   }
-  return Math.sqrt(best) < DIST_THRESHOLD_DEG
-    ? (bestId as string)
-    : `DR-${localCounter++}`;
+  return Math.sqrt(best) < DIST_THRESHOLD_DEG ? (bestId as string) : `DR-${localCounter++}`;
+}
+
+function cleanReg(reg?: string | null) {
+  if (reg == null) return undefined;
+  const t = String(reg).trim();
+  return t.length ? t : undefined;
 }
 
 export function initSocket() {
@@ -55,27 +60,27 @@ export function initSocket() {
   const URL = import.meta.env.VITE_WS_URL || "http://localhost:9013";
   socket = io(URL, {
     path: "/socket.io",
-    transports: ["polling"],
+    transports: ["websocket", "polling"],
     withCredentials: false,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 500,
+    timeout: 10000,
   });
 
   socket.on("message", (payload: FeatureCollection) => {
-    if (
-      !payload ||
-      payload.type !== "FeatureCollection" ||
-      !payload.features?.length
-    )
-      return;
+    if (!payload || payload.type !== "FeatureCollection" || !payload.features?.length) return;
     const st = useDronesStore.getState();
     for (const f of payload.features) {
-      const p = f?.properties;
+      const p = f?.properties || {};
       const coords = f?.geometry?.coordinates as [number, number];
-      if (!p || !coords) continue;
+      if (!coords) continue;
       const id = getOrCreateTrackId(coords);
       const existing = st.drones[id];
+      const reg = cleanReg(p.registration) ?? cleanReg(p.serial);
       st.upsertDrone({
         id,
-        registration: p.registration ?? existing?.registration ?? id,
+        registration: reg ?? existing?.registration,
         altitude: Number(p.altitude ?? existing?.altitude ?? 0),
         yaw: Number(p.yaw ?? existing?.yaw ?? 0),
         coordinates: coords,
@@ -90,9 +95,10 @@ export function initSocket() {
     const coords: [number, number] = [msg.lng, msg.lat];
     const id = getOrCreateTrackId(coords);
     const existing = st.drones[id];
+    const reg = cleanReg(msg.registration);
     st.upsertDrone({
       id,
-      registration: msg.registration ?? existing?.registration ?? id,
+      registration: reg ?? existing?.registration,
       altitude: Number(msg.altitude ?? existing?.altitude ?? 0),
       yaw: Number(msg.yaw ?? existing?.yaw ?? 0),
       coordinates: coords,
@@ -101,4 +107,14 @@ export function initSocket() {
   });
 
   return socket;
+}
+
+export function closeSocket() {
+  if (!socket) return;
+  try {
+    socket.removeAllListeners();
+    socket.disconnect();
+  } finally {
+    socket = null;
+  }
 }
