@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import Map from "./components/Map";
 import { initSocket } from "./services/socket";
-import { useDronesStore, canFly } from "./state/useDronesStore";
+import {
+  useDronesStore,
+  canFly,
+  flightTimeString,
+} from "./state/useDronesStore";
 import "./index.css";
 
 export default function App() {
@@ -63,11 +67,16 @@ export default function App() {
                 >
                   <div className="list-row">
                     <span className="reg">{d.registration}</span>
-                    <span className={`tag ${canFly(d.registration) ? "g" : "r"}`}>
+                    <span
+                      className={`tag ${canFly(d.registration) ? "g" : "r"}`}
+                    >
                       {canFly(d.registration) ? "Green" : "Red"}
                     </span>
                   </div>
                   <div className="muted">{Math.round(d.altitude)} m</div>
+                  <div className="muted">
+                    Flight: {flightTimeString(d.takeoffAt)}
+                  </div>
                 </li>
               );
               return Item;
