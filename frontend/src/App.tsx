@@ -1,65 +1,88 @@
-import { useEffect } from "react";
-import { useDronesStore } from "./state/useDronesStore";
+import { useEffect, useMemo, useRef } from "react";
 import Map from "./components/Map";
-import { io } from "socket.io-client";
-import type { Drone } from "./state/useDronesStore";
+import { initSocket } from "./services/socket";
+import { useDronesStore, canFly } from "./state/useDronesStore";
+import "./index.css";
 
-const socket = io(import.meta.env.VITE_WS_URL || "http://localhost:9013", {
-  transports: ["polling"],
-});
-
-const adaptFromGeoJSON = (msg: any): Drone | null => {
-  if (!msg || !msg.features || !msg.features[0]) return null;
-
-  const f = msg.features[0];
-  const props = f.properties || {};
-  const coords = f.geometry?.coordinates || [0, 0];
-
-  return {
-    id: props.serial || "",
-    serial: props.serial || "",
-    registration: props.registration || "",
-    altitude: Number(props.altitude) || 0,
-    yaw: Number(props.yaw) || 0,
-    coordinates: [coords[0], coords[1]],
-    pilot: props.pilot || "",
-    organization: props.organization || "",
-    track: [],
-    startTime: Date.now(),
-  };
-};
-
-function App() {
-  const drones = useDronesStore((state) => state.drones);
-  const addOrUpdate = useDronesStore((s) => s.addOrUpdateDrone);
-
+export default function App() {
   useEffect(() => {
-    socket.on("message", (msg) => {
-      const d = adaptFromGeoJSON(msg);
-      if (d) addOrUpdate(d);
-    });
+    initSocket();
   }, []);
 
+  const drones = useDronesStore((s) => s.drones);
+  const selectedId = useDronesStore((s) => s.selectedId);
+  const setSelected = useDronesStore((s) => s.setSelected);
+
+  const list = useMemo(() => Object.values(drones), [drones]);
+
+  const greenCount = useMemo(
+    () => list.filter((d) => canFly(d.registration)).length,
+    [list]
+  );
+  const redCount = useMemo(() => list.length - greenCount, [list, greenCount]);
+
+  const selectedRef = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    selectedRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
+
   return (
-    <div className="p-4 space-y-4">
-      <h1 className="text-xl font-bold">Sager Drone</h1>
+    <div className="app-root">
+      <header className="app-header">
+        <div className="brand">Sager Drone</div>
+      </header>
 
-      <div style={{ height: 600 }}>
-        <Map />
-      </div>
+      <div className="app-body">
+        <aside className="side-panel">
+          <div className="dash">
+            <div className="dash-card">
+              <div className="dash-title">Total</div>
+              <div className="dash-value">{list.length}</div>
+            </div>
+            <div className="dash-card green">
+              <div className="dash-title">Green</div>
+              <div className="dash-value">{greenCount}</div>
+            </div>
+            <div className="dash-card red">
+              <div className="dash-title">Red</div>
+              <div className="dash-value">{redCount}</div>
+            </div>
+          </div>
 
-      <div>
-        <h2 className="text-lg font-semibold mt-4">Live Drones</h2>
-        <ul className="list-disc pl-6">
-          {Object.values(drones).map((drone) => (
-            <li key={drone.id}>
-              {drone.registration} - {Math.round(drone.altitude)}m
-            </li>
-          ))}
-        </ul>
+          <h2 className="section-title">Live Drones</h2>
+          <ul className="list">
+            {list.map((d) => {
+              const isSelected = selectedId === d.id;
+              const Item = (
+                <li
+                  key={d.id}
+                  ref={isSelected ? selectedRef : null}
+                  className={`list-item ${isSelected ? "selected" : ""}`}
+                  onClick={() => setSelected(d.id)}
+                  title="Move map to this drone"
+                >
+                  <div className="list-row">
+                    <span className="reg">{d.registration}</span>
+                    <span className={`tag ${canFly(d.registration) ? "g" : "r"}`}>
+                      {canFly(d.registration) ? "Green" : "Red"}
+                    </span>
+                  </div>
+                  <div className="muted">{Math.round(d.altitude)} m</div>
+                </li>
+              );
+              return Item;
+            })}
+            {!list.length && <li className="muted">Waiting for drones…</li>}
+          </ul>
+        </aside>
+
+        <main className="map-wrap">
+          <Map />
+          <div className="red-counter">
+            <b>Red drones:</b> {redCount}
+          </div>
+        </main>
       </div>
     </div>
   );
 }
-
-export default App;

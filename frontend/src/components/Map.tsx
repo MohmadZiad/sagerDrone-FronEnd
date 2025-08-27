@@ -1,136 +1,154 @@
 import { useEffect, useRef } from "react";
-import mapboxgl, { GeoJSONSource } from "mapbox-gl";
-import { useDronesStore } from "../state/useDronesStore";
+import mapboxgl, { Map as MapboxMap, Marker, Popup } from "mapbox-gl";
+import type { LngLatLike } from "mapbox-gl"; 
 import "mapbox-gl/dist/mapbox-gl.css";
-import type { Feature, LineString } from "geojson";
+import { useDronesStore, canFly, flightTimeString } from "../state/useDronesStore";
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
 
-const canFly = (registration: string) => {
-  if (!registration) return false;
-  const last = registration.split("-").pop()!.trim();
-  return last.toUpperCase().startsWith("B");
-};
+type MarkerBundle = { marker: Marker; popup: Popup };
 
-const fmtDuration = (ms: number) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const h = String(Math.floor(s / 3600)).padStart(2, "0");
-  const m = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
-  const ss = String(s % 60).padStart(2, "0");
-  return `${h}:${m}:${ss}`;
-};
-
-const Map = () => {
-  const mapContainer = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
+export default function Map() {
+  const mapRef = useRef<MapboxMap | null>(null);
+  const markersRef = useRef<Map<string, MarkerBundle>>(new globalThis.Map<string, MarkerBundle>());
   const loadedRef = useRef(false);
-  const markersRef = useRef<Record<string, mapboxgl.Marker>>({});
-  const popupRef = useRef<mapboxgl.Popup | null>(null);
-  const focusedRef = useRef(false);
-  const drones = useDronesStore((s) => s.drones);
-  const setSelected = useDronesStore((s) => s.setSelected);
 
+  const drones = useDronesStore((s) => s.drones);
+  const selectedId = useDronesStore((s) => s.selectedId);
+
+  // Init Map
   useEffect(() => {
-    if (!mapContainer.current) return;
-    const map = new mapboxgl.Map({
-      container: mapContainer.current,
+    if (mapRef.current) return;
+    mapRef.current = new mapboxgl.Map({
+      container: "map",
       style: "mapbox://styles/mapbox/dark-v11",
-      center: [35.91, 31.95],
-      zoom: 10,
+      center: [35.9, 31.95],
+      zoom: 5,
     });
-    map.on("load", () => {
+    mapRef.current.addControl(new mapboxgl.NavigationControl());
+
+    mapRef.current.on("load", () => {
       loadedRef.current = true;
-      popupRef.current = new mapboxgl.Popup({ closeButton: false, closeOnClick: false });
-      setTimeout(() => map.resize(), 0);
+      mapRef.current!.addSource("paths", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      mapRef.current!.addLayer({
+        id: "paths",
+        type: "line",
+        source: "paths",
+        paint: {
+          "line-color": "#7dd3fc",
+          "line-width": 2,
+          "line-opacity": 0.7,
+        },
+      });
     });
-    mapRef.current = map;
-    return () => map.remove();
+
+    return () => {
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
   }, []);
+
+  const makeIcon = (yaw: number, isGreen: boolean, isSelected: boolean) => {
+    const el = document.createElement("div");
+    el.style.width = "24px";
+    el.style.height = "24px";
+    el.style.transform = `rotate(${yaw}deg)`;
+    el.style.transition = "transform 120ms linear";
+    el.innerHTML = `
+      <svg viewBox="0 0 24 24" width="24" height="24">
+        <g>
+          <path d="M12 2 L15 10 L12 8 L9 10 Z" fill="${isGreen ? "#22c55e" : "#ef4444"}" opacity="${isSelected ? "1" : "0.9"}"/>
+          <circle cx="12" cy="12" r="${isSelected ? "5" : "3"}" fill="${isGreen ? "#16a34a" : "#b91c1c"}" />
+        </g>
+      </svg>
+    `;
+    return el;
+  };
 
   useEffect(() => {
     if (!mapRef.current || !loadedRef.current) return;
+
     const map = mapRef.current;
 
-    const all = Object.values(drones);
+    const seen = new Set<string>();
+    Object.values(drones).forEach((d) => {
+      seen.add(d.id);
+      const green = canFly(d.registration);
+      const isSelected = selectedId === d.id;
 
-    if (all.length && !focusedRef.current) {
-      const d0 = all[0];
-      map.flyTo({ center: [d0.coordinates[0], d0.coordinates[1]], zoom: 12 });
-      focusedRef.current = true;
-    }
+      const exists = markersRef.current.get(d.id);
+      const el = makeIcon(d.yaw ?? 0, green, isSelected);
 
-    all.forEach((d) => {
-      const [lng, lat] = d.coordinates;
-      const id = d.id;
-      const fly = canFly(d.registration);
-      const color = fly ? "#16a34a" : "#ef4444";
+      if (!exists) {
+        const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false, offset: 20 })
+          .setHTML(
+            `<div style="font: 12px system-ui, sans-serif">
+              <div><b>${d.registration}</b></div>
+              <div>Altitude: ${Math.round(d.altitude)} m</div>
+              <div>Flight: ${flightTimeString(d.takeoffAt)}</div>
+            </div>`
+          );
 
-      let marker = markersRef.current[id];
-      if (!marker) {
-        const el = document.createElement("div");
-        el.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l4 8-4-2-4 2 4-8zm0 10a1 1 0 110 2 1 1 0 010-2z" fill="${color}" /></svg>`;
-        el.style.transform = `rotate(${d.yaw}deg)`;
-        el.style.transformOrigin = "11px 11px";
-        el.style.cursor = "pointer";
-        el.addEventListener("mouseenter", () => {
-          const html = `<div style="font: 12px/1.4 Inter, system-ui"><div style="font-weight:600;margin-block-end:4px">${d.serial || d.id}</div><div>Altitude: <b>${Math.round(d.altitude)} m</b></div><div>Flight Time: <b>${fmtDuration(Date.now() - d.startTime)}</b></div></div>`;
-          popupRef.current?.setLngLat([lng, lat]).setHTML(html).addTo(map);
+        const marker = new mapboxgl.Marker({ element: el }).setLngLat(d.coordinates as LngLatLike).addTo(map);
+
+        marker.getElement().addEventListener("mouseenter", () => {
+          popup.setLngLat(d.coordinates as LngLatLike).addTo(map);
         });
-        el.addEventListener("mouseleave", () => popupRef.current?.remove());
-        el.addEventListener("click", () => setSelected(id));
-        marker = new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
-        markersRef.current[id] = marker;
+        marker.getElement().addEventListener("mouseleave", () => {
+          popup.remove();
+        });
+        marker.getElement().addEventListener("click", () => {
+          useDronesStore.getState().setSelected(d.id);
+        });
+
+        markersRef.current.set(d.id, { marker, popup });
       } else {
-        marker.setLngLat([lng, lat]);
-        const el = marker.getElement();
-        const p = el.querySelector("path");
-        if (p) p.setAttribute("fill", color);
-        el.style.transform = `rotate(${d.yaw}deg)`;
-        if (popupRef.current && popupRef.current.isOpen()) {
-          popupRef.current.setLngLat([lng, lat]);
-        }
+        exists.marker.setLngLat(d.coordinates as LngLatLike);
+        exists.marker.getElement().innerHTML = el.innerHTML;
+        exists.marker.getElement().style.transform = el.style.transform;
+        exists.popup.setHTML(
+          `<div style="font: 12px system-ui, sans-serif">
+            <div><b>${d.registration}</b></div>
+            <div>Altitude: ${Math.round(d.altitude)} m</div>
+            <div>Flight: ${flightTimeString(d.takeoffAt)}</div>
+          </div>`
+        );
       }
     });
 
-    const PATH_SRC = "all-paths";
-    const PATH_LAYER = "all-paths-layer";
-
-    const features: Feature<LineString>[] = all
-    
-      .filter((d) => (d.track?.length ?? 0) > 1)
-      .map((d) => ({
-        type: "Feature",
-        properties: {
-          color: canFly(d.registration) ? "#16a34a" : "#ef4444",
-        },
-        geometry: {
-          type: "LineString",
-          coordinates: d.track.map((c) => [c[0], c[1]]),
-        },
-      }));
-
-    const fc = { type: "FeatureCollection", features } as any;
-
-    const src = map.getSource(PATH_SRC) as GeoJSONSource | undefined;
-    if (!src) {
-      map.addSource(PATH_SRC, { type: "geojson", data: fc });
-      map.addLayer({
-        id: PATH_LAYER,
-        type: "line",
-        source: PATH_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": ["get", "color"],
-          "line-width": 3,
-          "line-opacity": 0.95,
-        },
-      });
-    } else {
-      src.setData(fc);
+    for (const [id, bundle] of markersRef.current.entries()) {
+      if (!seen.has(id)) {
+        bundle.popup.remove();
+        bundle.marker.remove();
+        markersRef.current.delete(id);
+      }
     }
-  }, [drones]);
 
-  return <div ref={mapContainer} style={{ width: "100%", height: "600px", position: "relative" }} />;
-};
+    const features = Object.values(drones).map((d) => ({
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: d.path || [] },
+      properties: { id: d.id },
+    }));
+    const src = map.getSource("paths") as mapboxgl.GeoJSONSource | undefined;
+    if (src) {
+      src.setData({ type: "FeatureCollection", features } as any);
+    }
 
-export default Map;
+    if (Object.values(drones).length === 1) {
+      const d = Object.values(drones)[0];
+      map.easeTo({ center: d.coordinates as LngLatLike, zoom: 10, duration: 500 });
+    }
+  }, [drones, selectedId]);
+
+  useEffect(() => {
+    if (!mapRef.current || !loadedRef.current || !selectedId) return;
+    const d = useDronesStore.getState().drones[selectedId];
+    if (!d) return;
+    mapRef.current.flyTo({ center: d.coordinates as LngLatLike, zoom: 13, speed: 0.8, curve: 1.3 });
+  }, [selectedId]);
+
+  return <div id="map" className="map-root" />;
+}
