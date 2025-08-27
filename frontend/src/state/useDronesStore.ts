@@ -5,74 +5,144 @@ export type Drone = {
   registration: string;
   altitude: number;
   yaw: number;
-  coordinates: [number, number];
-  takeoffAt?: number;
+  coordinates: [number, number]; // [lng, lat]
+  takeoffAt?: number; // first-seen time (ms since epoch)
   path: [number, number][];
 };
 
 type DronesState = {
   drones: Record<string, Drone>;
   selectedId: string | null;
+
+  /**
+   * Insert or update a drone. Path is optional; if omitted, a new point is
+   * appended to the existing path with smoothing & bounding.
+   */
   upsertDrone: (
     partial: Omit<Drone, "path"> & { path?: [number, number][] }
   ) => void;
+
+  /** Set the currently selected drone id (or null to clear). */
   setSelected: (id: string | null) => void;
+
+  /** Clear all drones and selection. */
   reset: () => void;
 };
+
+/* ------------------------------- Tuning ------------------------------- */
+
+const MAX_TRAIL_POINTS = 500;
+
+const SAME_POINT_EPSILON = 1e-7;
+
+const MAX_JUMP_DEGREES = 0.02;
+
+const SMOOTHING_ALPHA = 0.2;
+
+const INITIAL_TINY_OFFSET: [number, number] = [0.00005, 0.00005];
+
+/* ---------------------------- Path Utilities --------------------------- */
+
+/** Keep only the last N points (ring-buffer behavior via slice). */
+function clipTrail(
+  trail: [number, number][],
+  maxPoints = MAX_TRAIL_POINTS
+): [number, number][] {
+  if (trail.length > maxPoints) {
+    return trail.slice(trail.length - maxPoints);
+  }
+  return trail;
+}
+
+/** Exponential smoothing new coord against previous one (if exists). */
+function smoothCoord(
+  prev: [number, number] | undefined,
+  raw: [number, number],
+  alpha = SMOOTHING_ALPHA
+): [number, number] {
+  if (!prev) return raw;
+  return [
+    prev[0] + alpha * (raw[0] - prev[0]),
+    prev[1] + alpha * (raw[1] - prev[1]),
+  ];
+}
+
+/** True if two coordinates are practically identical under epsilon. */
+function isSamePoint(
+  a: [number, number],
+  b: [number, number],
+  eps = SAME_POINT_EPSILON
+): boolean {
+  return Math.abs(a[0] - b[0]) < eps && Math.abs(a[1] - b[1]) < eps;
+}
+
+/** True if the distance between two coordinates exceeds the jump threshold. */
+function isBigJump(
+  a: [number, number],
+  b: [number, number],
+  jumpDeg = MAX_JUMP_DEGREES
+): boolean {
+  const dx = a[0] - b[0];
+  const dy = a[1] - b[1];
+  return Math.hypot(dx, dy) > jumpDeg;
+}
+
+function buildNextTrail(
+  prevTrail: [number, number][],
+  raw: [number, number]
+): { nextTrail: [number, number][]; coord: [number, number] } {
+  const clipped = clipTrail(prevTrail);
+  const last = clipped[clipped.length - 1];
+  const coord = smoothCoord(last, raw);
+
+  if (!clipped.length) {
+    // Seed with a tiny second point so Mapbox line is visible from the start.
+    return {
+      coord,
+      nextTrail: [
+        coord,
+        [coord[0] + INITIAL_TINY_OFFSET[0], coord[1] + INITIAL_TINY_OFFSET[1]],
+      ],
+    };
+  }
+
+  if (isSamePoint(coord, last)) {
+    return { coord, nextTrail: clipped };
+  }
+
+  if (isBigJump(coord, last)) {
+    return { coord, nextTrail: [last, coord] };
+  }
+
+  return { coord, nextTrail: [...clipped, coord] };
+}
+
+/* ------------------------------ The Store ------------------------------ */
 
 export const useDronesStore = create<DronesState>((set, get) => ({
   drones: {},
   selectedId: null,
 
   upsertDrone: (partial) => {
-    const curr = get().drones[partial.id];
-    const MAX_POINTS = 500;
-    const SAME_EPS = 1e-7;
-    const MAX_JUMP_DEG = 0.02;
-    const SMOOTH_ALPHA = 0.2;
+    const current = get().drones[partial.id];
 
-    const raw: [number, number] = partial.coordinates;
-    const prevPath = curr?.path ?? [];
-    const clipped =
-      prevPath.length > MAX_POINTS
-        ? prevPath.slice(prevPath.length - MAX_POINTS)
-        : prevPath;
+    // Raw point coming from the socket (or callers): [lng, lat]
+    const rawCoord: [number, number] = partial.coordinates;
 
-    const last = clipped[clipped.length - 1];
-
-    const coord: [number, number] = last
-      ? [
-          last[0] + SMOOTH_ALPHA * (raw[0] - last[0]),
-          last[1] + SMOOTH_ALPHA * (raw[1] - last[1]),
-        ]
-      : raw;
-
-    let nextPath: [number, number][];
-    if (!clipped.length) {
-      nextPath = [coord, [coord[0] + 0.00005, coord[1] + 0.00005]];
-    } else {
-      const sameAsLast =
-        Math.abs(coord[0] - last[0]) < SAME_EPS &&
-        Math.abs(coord[1] - last[1]) < SAME_EPS;
-
-      if (sameAsLast) {
-        nextPath = clipped;
-      } else {
-        const dx = coord[0] - last[0];
-        const dy = coord[1] - last[1];
-        const isBigJump = Math.hypot(dx, dy) > MAX_JUMP_DEG;
-        nextPath = isBigJump ? [last, coord] : [...clipped, coord];
-      }
-    }
+    // Build/extend the path only if caller didn't provide a full path explicitly.
+    const prevPath = current?.path ?? [];
+    const { coord, nextTrail } = partial.path
+      ? { coord: rawCoord, nextTrail: partial.path }
+      : buildNextTrail(prevPath, rawCoord);
 
     const merged: Drone = {
       id: partial.id,
-      registration: partial.registration ?? curr?.registration ?? "",
-      altitude: partial.altitude ?? curr?.altitude ?? 0,
-      yaw: partial.yaw ?? curr?.yaw ?? 0,
+      registration: partial.registration ?? current?.registration ?? "",
+      altitude: partial.altitude ?? current?.altitude ?? 0,
+      yaw: partial.yaw ?? current?.yaw ?? 0,
       coordinates: coord,
-      takeoffAt: partial.takeoffAt ?? curr?.takeoffAt ?? Date.now(),
-      path: partial.path ?? nextPath,
+      takeoffAt: partial.takeoffAt ?? current?.takeoffAt ?? Date.now(),
+      path: nextTrail,
     };
 
     set((s) => ({
@@ -87,6 +157,11 @@ export const useDronesStore = create<DronesState>((set, get) => ({
   reset: () => set({ drones: {}, selectedId: null }),
 }));
 
+/* ----------------------------- Domain Helpers ----------------------------- */
+
+/**
+ * - Drones whose registration *ends with a segment* that starts with 'B' can fly.
+ */
 export function canFly(registration?: string) {
   const tail = registration?.split("-").pop()?.trim().toUpperCase() ?? "";
   return tail.startsWith("B");
