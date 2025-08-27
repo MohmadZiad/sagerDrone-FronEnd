@@ -27,7 +27,7 @@ app.use(cors());
 
 
 // LISTEN
-const port = 9013;
+const port = process.env.PORT || 9013;
 server.listen(port, () => {
   console.log(`App running on port ${port}...`);
 });
